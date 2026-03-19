@@ -4,9 +4,10 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import torch
+from ultralytics import YOLO
 
 st.set_page_config(
-    page_title="Detección de Objetos en Tiempo Real",
+    page_title="Detección de Objetos Personalizada",
     page_icon="🔍",
     layout="wide"
 )
@@ -14,94 +15,95 @@ st.set_page_config(
 @st.cache_resource
 def load_model():
     try:
-        from ultralytics import YOLO
-        model = YOLO("yolov5su.pt")
+        # Usamos yolov8n o yolov5su según tu preferencia, YOLOv8 es más actual
+        model = YOLO("yolov8n.pt") 
         return model
     except Exception as e:
         st.error(f"❌ Error al cargar el modelo: {str(e)}")
         return None
 
-st.title("🔍 Detección de Objetos en Imágenes")
-st.markdown("Esta aplicación utiliza YOLOv5 para detectar objetos en imágenes capturadas con tu cámara.")
+# --- BARRA LATERAL ---
+with st.sidebar:
+    # 1. Insertar tu imagen personalizada
+    try:
+        img_lupa = Image.open("lupaMujer.JPEG")
+        st.image(img_lupa, use_container_width=True)
+    except:
+        st.caption("Asegúrate de que 'lupaMujer.JPEG' esté en la misma carpeta.")
 
-with st.spinner("Cargando modelo YOLOv5..."):
-    model = load_model()
+    st.title("Parámetros")
+    
+    # 2. BUSCADOR ESPECÍFICO
+    st.subheader("¿Qué quieres buscar?")
+    target_object = st.text_input("Escribe el objeto (en inglés, ej: person, dog, cell phone)", "").lower()
+    
+    st.divider()
+    conf_threshold = st.slider("Confianza mínima", 0.0, 1.0, 0.25, 0.01)
+    iou_threshold  = st.slider("Umbral IoU", 0.0, 1.0, 0.45, 0.01)
+    max_det        = st.number_input("Detecciones máximas", 10, 2000, 1000, 10)
+
+# --- CUERPO PRINCIPAL ---
+st.title("🔍 Detección Selectiva de Objetos")
+st.markdown("Esta app solo mostrará los objetos que coincidan con tu búsqueda.")
+
+model = load_model()
 
 if model:
-    with st.sidebar:
-        st.title("Parámetros")
-        st.subheader("Configuración de detección")
-        conf_threshold = st.slider("Confianza mínima", 0.0, 1.0, 0.25, 0.01)
-        iou_threshold  = st.slider("Umbral IoU", 0.0, 1.0, 0.45, 0.01)
-        max_det        = st.number_input("Detecciones máximas", 10, 2000, 1000, 10)
+    # Obtener el mapeo de nombres del modelo (id: nombre)
+    names = model.names
+    # Crear un mapeo inverso (nombre: id) para filtrar
+    name_to_id = {v.lower(): k for k, v in names.items()}
 
     picture = st.camera_input("Capturar imagen", key="camera")
 
     if picture:
         bytes_data = picture.getvalue()
-
-        # Decodificar con Pillow en lugar de cv2 (evita dependencia libGL)
-        #pil_img  = Image.open(io.BytesIO(bytes_data)).convert("RGB")
-        #np_img   = np.array(pil_img)   # array RGB
-
         pil_img = Image.open(io.BytesIO(bytes_data)).convert("RGB")
-        np_img  = np.array(pil_img)[..., ::-1]  # RGB → BGR para que YOLO procese bien
+        np_img = np.array(pil_img) 
 
-        
-        with st.spinner("Detectando objetos..."):
-            try:
-                results = model(
-                    np_img,
-                    conf=conf_threshold,
-                    iou=iou_threshold,
-                    max_det=int(max_det)
-                )
-            except Exception as e:
-                st.error(f"Error durante la detección: {str(e)}")
-                st.stop()
+        # Lógica de filtrado por clases
+        selected_classes = None
+        if target_object in name_to_id:
+            selected_classes = [name_to_id[target_object]]
+            st.success(f"Buscando únicamente: **{target_object}**")
+        elif target_object != "":
+            st.warning(f"El objeto '{target_object}' no está en la base de datos. Se mostrarán todos los objetos por defecto.")
 
-        result    = results[0]
-        boxes     = result.boxes
-        annotated = result.plot()              # devuelve BGR numpy array
-        annotated_rgb = annotated[:, :, ::-1]  # BGR → RGB sin cv2
+        with st.spinner("Analizando..."):
+            results = model(
+                np_img,
+                conf=conf_threshold,
+                iou=iou_threshold,
+                max_det=int(max_det),
+                classes=selected_classes # Aquí ocurre la magia del filtro
+            )
+
+        result = results[0]
+        annotated_rgb = result.plot() # YOLOv8 ya devuelve RGB/BGR según el input
 
         col1, col2 = st.columns(2)
 
         with col1:
-            st.subheader("Imagen con detecciones")
+            st.subheader("Resultado de la búsqueda")
             st.image(annotated_rgb, use_container_width=True)
 
         with col2:
-            st.subheader("Objetos detectados")
+            st.subheader("Resumen de hallazgos")
+            boxes = result.boxes
             if boxes is not None and len(boxes) > 0:
-                label_names    = model.names
-                category_count = {}
-                category_conf  = {}
-
+                counts = {}
                 for box in boxes:
-                    cat  = int(box.cls.item())
-                    conf = float(box.conf.item())
-                    category_count[cat] = category_count.get(cat, 0) + 1
-                    category_conf.setdefault(cat, []).append(conf)
-
-                data = [
-                    {
-                        "Categoría":          label_names[cat],
-                        "Cantidad":           count,
-                        "Confianza promedio": f"{np.mean(category_conf[cat]):.2f}"
-                    }
-                    for cat, count in category_count.items()
-                ]
-
-                df = pd.DataFrame(data)
+                    label = names[int(box.cls)]
+                    counts[label] = counts.get(label, 0) + 1
+                
+                df = pd.DataFrame([{"Objeto": k, "Cantidad": v} for k, v in counts.items()])
                 st.dataframe(df, use_container_width=True)
-                st.bar_chart(df.set_index("Categoría")["Cantidad"])
+                st.bar_chart(df.set_index("Objeto")["Cantidad"])
             else:
-                st.info("No se detectaron objetos con los parámetros actuales.")
-                st.caption("Prueba a reducir el umbral de confianza en la barra lateral.")
+                st.info("No se encontró lo que buscas en esta imagen.")
+
 else:
-    st.error("No se pudo cargar el modelo. Verifica las dependencias e inténtalo nuevamente.")
-    st.stop()
+    st.error("Error al inicializar el modelo.")
 
 st.markdown("---")
-st.caption("**Acerca de la aplicación**: Detección de objetos con YOLOv5 + Streamlit + PyTorch.")
+st.caption("Desarrollado con enfoque en Ergonomía Cognitiva para facilitar la búsqueda visual.")
