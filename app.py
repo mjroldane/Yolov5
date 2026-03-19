@@ -1,109 +1,84 @@
-from PIL import Image
-import io
 import streamlit as st
 import numpy as np
 import pandas as pd
 import torch
+import io
+from PIL import Image
 from ultralytics import YOLO
 
-st.set_page_config(
-    page_title="Detección de Objetos Personalizada",
-    page_icon="🔍",
-    layout="wide"
-)
+# --- Configuración Inicial ---
+st.set_page_config(page_title="Buscador Inteligente", layout="wide")
 
 @st.cache_resource
-def load_model():
-    try:
-        # Usamos yolov8n o yolov5su según tu preferencia, YOLOv8 es más actual
-        model = YOLO("yolov8n.pt") 
-        return model
-    except Exception as e:
-        st.error(f"❌ Error al cargar el modelo: {str(e)}")
-        return None
+def load_yolo():
+    return YOLO("yolov8n.pt") # YOLOv8 es más rápido y preciso
 
-# --- BARRA LATERAL ---
+model = load_yolo()
+
+# --- BARRA LATERAL (Donde va la imagen y el buscador) ---
 with st.sidebar:
-    # 1. Insertar tu imagen personalizada
+    # Intentamos cargar la imagen con las dos extensiones más comunes
     try:
-        img_lupa = Image.open("lupaMujer.JPEG")
+        # Probamos con .jpg (como se ve en tu captura)
+        img_lupa = Image.open("lupaMujer.jpg")
         st.image(img_lupa, use_container_width=True)
-    except:
-        st.caption("Asegúrate de que 'lupaMujer.JPEG' esté en la misma carpeta.")
+    except FileNotFoundError:
+        try:
+            # Si falla, probamos con .JPEG (por si acaso)
+            img_lupa = Image.open("lupaMujer.JPEG")
+            st.image(img_lupa, use_container_width=True)
+        except FileNotFoundError:
+            st.error("⚠️ No se encontró 'lupaMujer.jpg'. Verifica que esté en la misma carpeta que este script.")
 
-    st.title("Parámetros")
+    st.title("Filtro de Búsqueda")
     
-    # 2. BUSCADOR ESPECÍFICO
-    st.subheader("¿Qué quieres buscar?")
-    target_object = st.text_input("Escribe el objeto (en inglés, ej: person, dog, cell phone)", "").lower()
+    # Campo para escribir qué queremos buscar
+    target = st.text_input("¿Qué objeto buscas?", placeholder="Ej: person, cell phone, cup").lower().strip()
     
     st.divider()
-    conf_threshold = st.slider("Confianza mínima", 0.0, 1.0, 0.25, 0.01)
-    iou_threshold  = st.slider("Umbral IoU", 0.0, 1.0, 0.45, 0.01)
-    max_det        = st.number_input("Detecciones máximas", 10, 2000, 1000, 10)
+    conf_level = st.slider("Sensibilidad (Confianza)", 0.0, 1.0, 0.25)
 
 # --- CUERPO PRINCIPAL ---
-st.title("🔍 Detección Selectiva de Objetos")
-st.markdown("Esta app solo mostrará los objetos que coincidan con tu búsqueda.")
+st.title("🔍 Detector Selectivo")
 
-model = load_model()
+picture = st.camera_input("Toma una foto")
 
-if model:
-    # Obtener el mapeo de nombres del modelo (id: nombre)
-    names = model.names
-    # Crear un mapeo inverso (nombre: id) para filtrar
-    name_to_id = {v.lower(): k for k, v in names.items()}
+if picture and model:
+    # Procesar imagen
+    img = Image.open(io.BytesIO(picture.getvalue())).convert("RGB")
+    img_array = np.array(img)
 
-    picture = st.camera_input("Capturar imagen", key="camera")
+    # Lógica de filtrado: Obtener IDs de clases
+    # YOLO maneja nombres como 'person', 'cell phone', etc.
+    class_ids = None
+    if target:
+        # Buscamos el ID numérico que corresponde al texto escrito
+        class_ids = [id for id, name in model.names.items() if name.lower() == target]
+        
+        if not class_ids:
+            st.warning(f"El objeto '{target}' no existe en la base de datos de YOLO. Mostrando todo por defecto.")
+            class_ids = None
+        else:
+            st.success(f"Filtrando resultados para: **{target}**")
 
-    if picture:
-        bytes_data = picture.getvalue()
-        pil_img = Image.open(io.BytesIO(bytes_data)).convert("RGB")
-        np_img = np.array(pil_img) 
-
-        # Lógica de filtrado por clases
-        selected_classes = None
-        if target_object in name_to_id:
-            selected_classes = [name_to_id[target_object]]
-            st.success(f"Buscando únicamente: **{target_object}**")
-        elif target_object != "":
-            st.warning(f"El objeto '{target_object}' no está en la base de datos. Se mostrarán todos los objetos por defecto.")
-
-        with st.spinner("Analizando..."):
-            results = model(
-                np_img,
-                conf=conf_threshold,
-                iou=iou_threshold,
-                max_det=int(max_det),
-                classes=selected_classes # Aquí ocurre la magia del filtro
-            )
-
-        result = results[0]
-        annotated_rgb = result.plot() # YOLOv8 ya devuelve RGB/BGR según el input
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("Resultado de la búsqueda")
-            st.image(annotated_rgb, use_container_width=True)
-
-        with col2:
-            st.subheader("Resumen de hallazgos")
-            boxes = result.boxes
-            if boxes is not None and len(boxes) > 0:
-                counts = {}
-                for box in boxes:
-                    label = names[int(box.cls)]
-                    counts[label] = counts.get(label, 0) + 1
-                
-                df = pd.DataFrame([{"Objeto": k, "Cantidad": v} for k, v in counts.items()])
-                st.dataframe(df, use_container_width=True)
-                st.bar_chart(df.set_index("Objeto")["Cantidad"])
-            else:
-                st.info("No se encontró lo que buscas en esta imagen.")
-
-else:
-    st.error("Error al inicializar el modelo.")
-
-st.markdown("---")
-st.caption("Desarrollado con enfoque en Ergonomía Cognitiva para facilitar la búsqueda visual.")
+    # Predicción
+    results = model(img_array, conf=conf_level, classes=class_ids)
+    
+    # Dibujar resultados
+    annotated_img = results[0].plot()
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.image(annotated_img, caption="Resultado de la búsqueda", use_container_width=True)
+    
+    with col2:
+        st.subheader("Estadísticas")
+        if len(results[0].boxes) > 0:
+            # Contar detecciones
+            found_names = [model.names[int(b.cls)] for b in results[0].boxes]
+            df = pd.DataFrame(found_names, columns=["Objeto"]).value_counts().reset_index()
+            df.columns = ["Objeto", "Cantidad"]
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No se encontró el objeto buscado.")
